@@ -1,0 +1,1276 @@
+---
+title: "**Homework 2**"
+author: "**Alejandro Ponce Fernandez**"
+date: "**2022-12-07**"
+output:
+   html_document:
+     theme: united
+     toc: true
+     toc_float: true
+     toc_collapsed: true
+     highlight: tango
+  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+
+Before anything else, we will start by cleaning up the enviroment and running
+all the libraries we will need to complete the assignment:
+```{r}
+rm(list = ls())
+```
+
+```{r}
+set.seed(123)
+library("pROC")
+library("olsrr")
+library("ggplot2")
+library("corrplot")
+library("ggpubr")
+library("devtools")
+library("tint")
+library("tidyverse")
+library("MASS")
+library("caret")
+library("e1071") 
+library("rpart")
+library("rpart.plot")
+library("randomForest")
+library("glmnet")
+library("elasticnet")
+library("kknn")
+library("xgboost")
+```
+
+# **1. Introduction: The Data Set**
+The data set we will be using in this assignment contains data from 569 patients from
+the Wisconsin Diagnostic Breast Cancer (WDBC). It was donated by Nick Street in November
+1995. All the patients in the data set have a brest tumor. However, not all are malign. 
+
+```{r}
+data = read.csv("breastcancer.csv")
+```
+
+
+The data set contains 32 variables. The first one is a patient anonymous identifier. The second one,
+is the Diagnosis: either if the tumor is bening ("B") or malign ("M"). The other 30 variables give
+information about different relevant characteristics extracted using Nuclear Medicine Images.
+
+This 30 varaibles give information about 10 characteristics of the cells of the tumor. For every
+characteristic we know the mean, standard deviation and largest** value (computed as the mean of the three largest). For instance,
+column 3 would correspond to Mean Radius, column 4 to Radius Standard Deviation and column 5 for the largest value of radius. 
+The characteristics we have are:
+
+- Radius (columns 3-5): mean of distances from center to points in the perimeter of the cells.
+
+- Texture (columns 6-8): standard deviation of gray-scale values.
+
+- Perimeter (columns 9-11): perimeter of the cells.
+
+- Area (columns 12-14): area of the cells.
+
+- Smoothness (columns 15-17): local variation in radius lengths.
+
+- Compactness (columns 18-20): computed as perimeter^2/(area - 1.0)
+
+- Concavity (columns 21-23): severity of concave portions of the contour.
+
+- Concave points (columns 24-26): number of concave portions of the contour.
+
+- Symmetry (columns 27-29)
+
+- Fractal dimension (columns 30-32): coastline approximation 1.
+
+
+**Largest value is in reality "worst possible" value. In most variables this is also the largest
+but maybe not for all. 
+
+In the downloaded (and the one in the folder uploaded) data set columns are not named so we will start by doing that:
+
+```{r}
+names = c("ID", "Diagnosis", "MeanRadius", "RadiusSD", "RadiusLargest", 
+          "MeanTexture", "TextureSD", "TextureLargest", 
+          "MeanPerimeter", "PerimeterSD", "PerimeterLargest", 
+          "MeanArea", "AreaSD", "AreaLargest", 
+          "MeanSmoothness", "SmoothnessSD", "SmoothnessLargest", 
+          "MeanCompactness", "CompactnessSD", "CompactnessLargest", 
+          "MeanConcavity", "ConcavitySD", "ConcavityLargest", 
+          "MeanConcavePoints", "ConcavepointsSD", "ConcavepointsLargest", 
+          "MeanSymettry", "SymmetrySD", "SymmetryLargest", 
+          "MeanFractalDimension", "FractalDimensionSD", "FractalDimensionLargest" )
+colnames(data) = names
+```
+
+# **2. Data Preprocessing**
+
+We will crate another data set where we will make all the changes and use it for all
+the analysis:
+
+```{r}
+dataClean = data
+```
+
+First of all, we did a visual analysis of the data. It was noticed that one variable does not seem to be right.
+The three columns related to Texture make no sense. The mean value is of the order of 10^3-10^4. However,
+the standard deviation and largest values are of the order 10^-1-10^-2. The difference is too big so it has been considered that
+there was a mistake of some type so this columns will be removed:
+
+```{r}
+dataClean = dataClean[, -c(6,7,8)]
+```
+
+## **2.1 Removing NAs**
+
+Next step, is to check for missing values:
+
+```{r}
+apply(dataClean, 2, function(x) sum(is.na(x)))
+```
+As we can observe, we do have NAs in 3 variables. As in this data set we have Standard deviation, Mean and Largets value,
+we are going to use standarization to replace the NAs with values:
+
+z = (largest - mean)/sd
+
+Mean Z is going to be computed separetly for those patients whose tumor is benign and malign for all the rows where there is not
+a NA for the desired value. THen we will "undo" the proccess to obtain the desired variables. For example for Mean Area:
+
+MeanArea[i] = LargestValue - Z*sd
+
+Note that Z will have a different value if the patients tumor is bening or malign. 
+
+THis approach for NAs is better than just substituting for the mean of that column as this way we are using all the
+information we have about each variable "to predict" what the value should have been. If we run the code we substitute al the NAs:
+
+```{r}
+# We start with the MeanArea
+
+numbersTrueArea = c()
+numbersFalseArea = c()
+for(i in 1:length(data$ID)){
+  if(!is.na(data$MeanArea[i])){
+    if(data$Diagnosis[i] == "M"){
+      numbersTrueArea = c(numbersTrueArea, ((data$AreaLargest[i] - data$MeanArea[i])/data$AreaSD[i]))
+    }else{
+      numbersFalseArea = c(numbersFalseArea, ((data$AreaLargest[i] - data$MeanArea[i])/data$AreaSD[i]))
+    }
+    
+    
+  }
+}
+
+meanTrueArea = mean(numbersTrueArea)
+meanFalseArea = mean(numbersFalseArea)
+
+
+# as we wanna "predict what the mean could have been" coef = (largest -mean)/sd --> mean = largest-sd*coef
+
+for(i in 1:length(dataClean$ID)){
+  if(is.na(dataClean$MeanArea[i])){
+    if(dataClean$Diagnosis[i] == "M"){
+      dataClean$MeanArea[i] = data$AreaLargest[i]-meanTrueArea*data$AreaSD[i]
+    } else {
+      dataClean$MeanArea[i] = data$AreaLargest[i]-meanFalseArea*data$AreaSD[i]
+    }
+    
+  }
+}
+
+# MeanArea done
+# Now, largest Smoothness and Largest Concave points
+
+numbersTrueSmoothness = c()
+numbersFalseSmoothness = c()
+numbersTrueConcavepoints = c()
+numbersFalseConcavepoints = c()
+
+for(i in 1:length(data$ID)){
+  if(!is.na(data$SmoothnessLargest[i])){
+    if(data$Diagnosis[i] == "M"){
+      numbersTrueSmoothness = c(numbersTrueSmoothness, ((data$SmoothnessLargest[i] - data$MeanSmoothness[i])/data$SmoothnessSD[i]))
+    }else{
+      numbersFalseSmoothness = c(numbersFalseSmoothness, ((data$SmoothnessLargest[i] - data$MeanSmoothness[i])/data$SmoothnessSD[i]))
+    }
+    
+    
+  }
+  if(!is.na(data$ConcavepointsLargest[i])){
+    if(data$Diagnosis[i] == "M"){
+      numbersTrueConcavepoints = c(numbersTrueConcavepoints, ((data$ConcavepointsLargest[i] - data$MeanConcavePoints[i])/data$ConcavepointsSD[i]))
+    }else{
+      numbersFalseConcavepoints = c(numbersFalseConcavepoints, ((data$ConcavepointsLargest[i] - data$MeanConcavePoints[i])/data$ConcavepointsSD[i]))
+    }
+    
+    
+  }
+}
+
+meanTrueSmoothness = mean(numbersTrueSmoothness)
+meanFalseSmoothness = mean(numbersFalseSmoothness)
+
+meanTrueConcavepoints = mean(numbersTrueConcavepoints)
+meanFalseConcavepoints = mean(numbersFalseConcavepoints)
+
+
+# Now we reapply the operation to subsitute the NAs
+
+# coef = (largest -mean)/sd --> largest = sd*coef + mean
+
+for(i in 1:length(dataClean$ID)){
+  if(is.na(dataClean$SmoothnessLargest[i])){
+    if(dataClean$Diagnosis[i] == "M"){
+      dataClean$SmoothnessLargest[i] = meanTrueSmoothness*data$SmoothnessSD[i] + data$MeanSmoothness[i]
+    } else {
+      dataClean$SmoothnessLargest[i] = meanFalseSmoothness*data$SmoothnessSD[i] + data$MeanSmoothness[i]
+    }
+    
+  }
+  if(is.na(dataClean$ConcavepointsLargest[i])){
+    if(dataClean$Diagnosis[i] == "M"){
+      dataClean$ConcavepointsLargest[i] = meanTrueConcavepoints*data$ConcavepointsSD[i] + data$MeanConcavePoints[i]
+    } else {
+      dataClean$ConcavepointsLargest[i] = meanFalseConcavepoints*data$ConcavepointsSD[i] + data$MeanConcavePoints[i]
+    }
+    
+  }
+}
+```
+We check if this has been done properly by checking if there are no more NAs:
+
+```{r}
+apply(dataClean, 2, function(x) sum(is.na(x)))
+```
+
+Correct, all NAs subsituted. 
+
+## **2.2 Outlier visualization and removal**
+
+Now, lets check some box-plots to see if eliminating outliers is relevant. The mean columns 
+will be plotted as probably if there are outliers in these columns there will also be in the
+standard deviation and largest value columns:
+
+```{r}
+b1 = ggplot(dataClean, aes(x= Diagnosis, y = MeanRadius, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b2 = ggplot(dataClean, aes(x= Diagnosis, y = MeanPerimeter, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b3 = ggplot(dataClean, aes(x= Diagnosis, y = MeanArea, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b4 = ggplot(dataClean, aes(x= Diagnosis, y = MeanSmoothness, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b5 = ggplot(dataClean, aes(x= Diagnosis, y = MeanCompactness, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b6 = ggplot(dataClean, aes(x= Diagnosis, y = MeanConcavity, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b7 = ggplot(dataClean, aes(x= Diagnosis, y = MeanConcavePoints, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b8 = ggplot(dataClean, aes(x= Diagnosis, y = MeanSymettry, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+b9 = ggplot(dataClean, aes(x= Diagnosis, y = MeanFractalDimension, color=Diagnosis)) +
+  geom_boxplot() + scale_color_manual(values=c('#0000FF','#FF0000'))
+
+boxplots = ggarrange(b1, b2, b3, b4, b5, b6, b7, b8, b9)
+boxplots
+```
+
+As we can observe there are many outliers for both benign and malign tumors. We are going to
+count them: 
+
+```{r}
+# we will create a data frame that stores the number of outliers for every varaible
+numberOfOutliers = data.frame(colnames(dataClean), rep(0, 29), rep(0,29))
+colnames(numberOfOutliers) = c("Variable", "Normal", "Extreme")
+
+# this vector will store the position of all the outliers
+outlierIndex = c()
+
+
+# counting regular outliers
+for(i in 3:29){
+  mean = mean(dataClean[,i])
+  q25 = quantile(dataClean[,i], 0.25)
+  names(q25) = NULL
+  q75 = quantile(dataClean[,i], 0.75)
+  names(q75) = NULL
+  IQR = q75-q25
+  numberOfOutliers$Normal[i] =  length(which(dataClean[,i] <  (q25-IQR*1.5)| dataClean[,i] > (q75+IQR*1.5)))
+  for(j in 1:568){
+    if(!(is.na(dataClean[j,i]))){
+      if ((dataClean[j,i] <  (q25-IQR*1.5)| dataClean[j,i] > (q75+IQR*1.5))){
+        if(!(j %in% outlierIndex)){
+          outlierIndex = c(outlierIndex, j)
+        }
+      }
+    }
+  }
+}
+
+numberOfOutliers[,1:2]
+```
+In this data frame we can check the number of outliers for every variable. We will count them 
+because there are a lot:
+
+```{r}
+# we will do this by using the length of the vector that stores
+# the position of the outliers
+# when the vector was created it was ensured that non indexes are repeated
+length(outlierIndex)
+```
+As we previously supposed the number is too big: 181. Removing 181/568 rows would suppose removing
+31.87% of the data. This is too much so we will only remove the extreme outliers: 
+
+```{r}
+# this vector will store the position of all the extreme outliers for all
+# the variables
+outlierExtremeIndex = c()
+for (i in 3:29){
+  mean = mean(dataClean[,i])
+  q25 = quantile(dataClean[,i], 0.25)
+  names(q25) = NULL
+  q75 = quantile(dataClean[,i], 0.75)
+  names(q75) = NULL
+  IQR = q75-q25
+  numberOfOutliers$Extreme[i] =  length(which(dataClean[,i] <  (q25-IQR*3)| dataClean[,i] > (q75+IQR*3)))
+  
+  for(j in 1:568){
+    if(!(is.na(dataClean[j,i]))){
+      if ((dataClean[j,i] <  (q25-IQR*3)| dataClean[j,i] > (q75+IQR*3))){
+        if(!(j %in% outlierExtremeIndex)){
+          outlierExtremeIndex = c(outlierExtremeIndex, j)
+          
+        }
+      }
+    }
+  }
+}
+numberOfOutliers
+
+```
+As expected, there are less extreme outliers than regular ones. Lets count them: 
+
+```{r}
+# we will do this by using the length of the vector that stores
+# the position of the extreme outliers
+# when the vector was created it was ensured that non indexes are repeated
+length(outlierExtremeIndex)
+```
+71/568 means removing 12.5% of the data. This is a much more reasonable amount. However,
+before removing them we will for curiosity check if these outliers maintain the same
+proportion bening/malign as the data set as a whole. 
+
+```{r}
+length(which(data$Diagnosis[outlierExtremeIndex] == "M"))/length(outlierExtremeIndex)
+length(which(data$Diagnosis== "M"))/length(data$Diagnosis)
+```
+As we can observe inside the extreme outliers 64.79% of the data correspond to malign tumors.
+On the other hand in the data set in general, only 37.15% of the data correspond to malign tumors.
+This means, that if the tumor has extreme outlier values is much more likely that it is malign. However, 
+we will still remove extreme outlier values as we are interested on seeing if there is any pattern in the data
+that inside regular values of the varaible determines either if a tumor is malign or benign. 
+
+```{r}
+dataClean = dataClean[-outlierExtremeIndex,]
+```
+
+## **2.3 Correlation between variables**
+
+We are interested in correlation between variables to see if there is any relationship between them. For the rest, of the assignment we will change the name of the variables to some abreviations as they are to big to show on plots:
+
+```{r}
+namesAux = c("ID", "D", "MR", "Rsd", "RL", 
+          "MP", "Psd", "PL", 
+          "MA", "Asd", "AL", 
+          "MS", "Ssd", "SL", 
+          "MCa", "Casd", "CaL", 
+          "MC", "Csd", "CL", 
+          "MCP", "CPsd", "CPL", 
+          "MSy", "Sysd", "SyL", 
+          "MF", "Fsd", "FL" )
+colnames(dataClean) = namesAux
+
+names = c("ID", "Diagnosis", "MeanRadius", "RadiusSD", "RadiusLargest", 
+          "MeanPerimeter", "PerimeterSD", "PerimeterLargest", 
+          "MeanArea", "AreaSD", "AreaLargest", 
+          "MeanSmoothness", "SmoothnessSD", "SmoothnessLargest", 
+          "MeanCompactness", "CompactnessSD", "CompactnessLargest", 
+          "MeanConcavity", "ConcavitySD", "ConcavityLargest", 
+          "MeanConcavePoints", "ConcavepointsSD", "ConcavepointsLargest", 
+          "MeanSymettry", "SymmetrySD", "SymmetryLargest", 
+          "MeanFractalDimension", "FractalDimensionSD", "FractalDimensionLargest" )
+colnames(dataClean) = namesAux
+# table with equivalences
+equivalences = data.frame(namesAux, names)
+colnames(equivalences) = c("Abreviation", "Real")
+equivalences
+```
+
+No we will create a plot for th correlation matrix:
+
+```{r}
+corrMatrix = round(cor(dataClean[3:29]),2)
+
+corrplot(corrMatrix, method="circle")
+```
+
+The darkest blue values correspond to strong positive correlations. It can be assumed "obvious" that in most of the analyzed cells characteristics there is correlation between the mean, largest value and sd. The plot shows that even though it is not super strong, the assumption holds in most cases. There are other interesting correlations that we should take a look at:
+
+- Mean Perimeter (MP) and Mean Fractal Dimension (MF). (also with Symmetry Largest (SL))
+
+- Mean Radius (MR) and the Largest Value of Concave Points (CPL)
+
+- Mean Radius (MR) and Concave Points Standard Deviation (CPsd)
+
+- Area Standard Deviation (Asd) and Smoothness Standard Deviation (Ssd)
+
+We will proceed to analyze this correlations by visualizing the data.
+
+## **2.4 Data visualization**
+
+Before looking into the correlations lets comment the boxplots obtained when we removing the outliers:
+
+```{r}
+boxplots
+```
+
+** Remember this plot was done before removing the extreme outliers. 
+
+Observing the plots, we can observe that for all the mean values (except for Mean Concavity and Mean Area) of the cell parameters analyzed those tumors who are malign (represented in red) have higher means. This, might be an indicator to identify a malign tumor. This also agrees with the data base authors claim: "largest values correspond to worst values". This first look into the data would confirm this.
+
+Lets proceed having a look at the correlations we found. In first case lets check the relationship between Mean Perimeter and Mean Fractal Dimension:
+
+```{r}
+ggplot(dataClean, aes(x=MP, y=MF, color = D)) +
+  geom_point(size=2, shape=23) + geom_smooth(method=lm, se=FALSE, formula = y~x) + scale_color_manual(values=c('#0000FF','#FF0000')) +
+  xlab("Mean Perimeter") + ylab("Mean Fractal Dimension") + labs(color = "Diagnostic") + 
+  ggtitle("Mean Fractal Dimension as a function of the Mean Perimeter")
+```
+
+There is a clear separation between data corresponding to malign and benign tumors. Malign tumors have a higher values both for Mean Fractal Dimension and Mean Perimeter. Also, when comparing Mean Fractal Dimension as a linear function of the Mean Perimeter we can observe that Benign data has a higher slope than malign. 
+
+We also saw in the correlation plot that Mean Perimeter also has correlation with the Symmetry largest value so lets include this variable transforming the previous graph into a bubble graph:
+
+```{r}
+ggplot(dataClean, aes(x=MP, y=MF, size = SyL, color = D)) +
+  geom_point(alpha=0.7) + geom_smooth(method=lm, se=FALSE, formula = y~x) +
+  xlab("Mean Perimeter") + ylab("Mean Fractal Dimension") + labs(color = "Diagnostic", size = "Symmetry Largest") + 
+  ggtitle("Mean Fractal Dimension as a function of the Mean Perimeter") + scale_color_manual(values=c('#0000FF','#FF0000'))
+```
+
+The size of the bubbles corresponds to the Symmetry largest values. As we can see malign points (red bubbles) have a bigger size than benign points(blue bubbles). This corresponds with what was observed in the box-plots. Also, as we know from the correlation plot, the Symmetry Largest Value (size of the bubbles) increases with the Mean Perimeter. 
+
+The second correlation we want to visualize is Mean Radius and the Largest Value of Concave Points:
+
+```{r}
+ggplot(dataClean, aes(x=MR, y=CPL, color = D)) +
+  geom_point(size=2, shape=23) + geom_smooth(method=lm, se=FALSE, formula = y~x) + scale_color_manual(values=c('#0000FF','#FF0000')) +
+  xlab("Mean Radius") + ylab("Concave Points Largest Value") + labs(color = "Diagnostic") + 
+  ggtitle("Concave Points Largest Value as a function of the Mean Radius")
+```
+
+Again there is a clear differentiation between points corresponding to malign and benign tumors.However this time, the best fit linear line of Concave Points Largest Value as a function of the Mean Radius corresponding to malign tumors has a higher slope than the one for benign. In this graph we can see that the data are very close to the best fit lines which indicates that the linear assumption for the best fit line might be a good one. 
+
+The third strong correlation to analyze is between Mean Radius and Concave Points Standard Deviation:
+
+```{r}
+ggplot(dataClean, aes(x=MR, y=CPsd, color = D)) +
+  geom_point(size=2, shape=23) + geom_smooth(method=lm, se=FALSE, ) + scale_color_manual(values=c('#0000FF','#FF0000')) +
+  xlab("Mean Radius") + ylab("Concave Points Standard Deviation") + labs(color = "Diagnostic") + 
+  ggtitle("Concave Points Standard Deviation as a function of the Mean Radius")
+```
+
+As in the previous graphs, there is a clear differentiation between malign an benign tumors. This time, the slopes of the linear best fit functions of Concave Points sd as a function of the Mean Radius are almost equal (visually). However again, malign data are above benign data. 
+
+Lastly, we want to visualize the correlation between Area Sd and Smoothness Sd:
+
+```{r}
+ggplot(dataClean, aes(x=Asd, y=Ssd, color = D)) +
+  geom_point(size=2, shape=23) + geom_smooth(method=lm, se=FALSE) + scale_color_manual(values=c('#0000FF','#FF0000')) +
+  xlab("Area Standard Deviation") + ylab("Smoothness Standard Deviation") + labs(color = "Diagnostic") + 
+  ggtitle("Symmetry Standard Deviation as a function of the Area Standard Deviation")
+```
+The linear best fit line of Smoothess Sd as a function of Area Sd has a bigger slope for malign data. As in all the previous graphs we can see again a clear differentiation between malign and benign data. 
+
+The last plot that we are going to check is a heat map between Mean Radius and Mean Smoothness. This is because these are the two variables with a greater difference between the means of benign and malign data as we can observe in the box-plots showed previously. We will only make on heat map without differientiating between malign and benign data:
+
+```{r}
+# creating a secondary data se for the heat map
+x1 = c(1:12)
+y1  = c(1:12)
+heatmap_matrix = expand.grid(X = x1, Y = y1)
+heatmap_matrix$count = 0
+
+for(i in 1:length(dataClean$ID)){
+  aux1 = 0
+  aux2 = 0.7
+  aux3 = 0
+  aux4 = 2.1
+  index = 1
+  for(j in 1:12){
+    if(dataClean$MS[i] >= aux1 && dataClean$MS[i] < aux2){
+      for(h in 1:12){
+        if(dataClean$MR[i] >= aux3 && dataClean$MR[i] < aux4){
+          heatmap_matrix$count[index+h] = heatmap_matrix$count[index+h] + 1
+        }
+        aux3 = aux3 + 2.1
+        aux4 = aux4 + 2.1
+      }
+      
+    }
+    index = index + 12
+    aux1 = aux1 + 0.7
+    aux2 = aux2 + 0.7
+  }
+  
+}
+
+# heat map
+ggplot(heatmap_matrix, aes(X, Y, fill= count)) + 
+  geom_tile() +scale_fill_viridis_c() + ggtitle("HeatMap") +
+  xlab("Mean Radius") + ylab("Mean Smoothness")
+```
+
+This heat map shows that inside the range of the variables with extreme outliers already removed,
+most of the data concentrates in one area. This area corresponds to approximately 7.5 for Mean Radius and 3 for Mean Smoothness. 
+
+## **2.5 Changing variables data type**
+
+Lastly for Data Preprocessing, we must make all the variables data type numeric. Lets check the actual type:
+
+```{r}
+str(dataClean)
+```
+
+Right now, only ID and Diagnosis are not numeric. ID will not be a useful variable throughout the assignment because it is only an identifier of the patient, it has no relation at all with the tumor. Therefore we will remove it from the clean data set.
+
+```{r}
+dataClean = dataClean[,-1]
+```
+
+Finally, we will factor tha Diagnosis column. Malign will now be equal to 2 and Benign equal to 1:
+```{r}
+dataClean$D = factor(dataClean$D, levels = c("B", "M"), labels = c("Benign","Malign"))
+str(dataClean)
+```
+Now they are all numeric so we are set to start with the modelling.
+
+# **3. Multiple Regression**
+
+Before starting with anything we must divide our data set in a train ar test set. We will have 80% of our data in the training test:
+
+```{r}
+split = createDataPartition(dataClean$D, p = 0.8, list = FALSE)  
+
+dataTrain = dataClean[split,]
+dataTest = dataClean[-split,]
+```
+
+## **3.1 LDA**
+
+We will start by creating a LDA classification model. First we need to know the dsitribution of Benign and Malign data along the training set:
+
+```{r}
+table(dataTrain$D)
+```
+Around 2/3 of the data correspond to benign tumors and 1/3 to malign ones. We will crate a model following this percentages:
+```{r}
+lda.model = lda(D ~ ., data = dataTrain, prior = c(2/3, 1/3))
+
+lda.model
+```
+First relevant thing we can observe is that in almost every variable, the difference between the mean of benign and malign tumors are significantly different. This is something we already noticed in the data visualization and is an indicator that we might be able to classify data with a high accuracy. We will now build another lda model but without any previous percentages:
+
+```{r}
+lda.model = lda(D ~ ., data = dataTrain)
+lda.model
+```
+The distribution of benign and malign tumor is pretty much the same, and we can see the same tendency with the means. We will stick with this model. We will create a vector that stores the probability of each data from the test set of being benign or malign:
+```{r}
+probability = predict(lda.model, newdata = dataTest)$posterior
+head(probability)
+```
+The first observations have a greater probability of being malign. We will now assign predictions based on if they higher probability of being malign or benign:
+```{r}
+prediction = max.col(probability)
+```
+Another way of doing this is directly using the predict function:
+```{r}
+prediction = predict(lda.model, newdata = dataTest)$class
+```
+Lets check how the results came:
+```{r}
+confusionMatrix(prediction, dataTest$D)$table
+confusionMatrix(prediction, dataTest$D)$overall[1]
+```
+We get e very high accuracy, 93.93%. However, our mistakes are malign and predicted as benign. This a problem in the bio-sanitary sector, specially with cancer as we usually need to attack the disease as quickly as possible. It would be better if our predicting errors were true benign tumors assigned as malign.
+
+## **3.2 QDA**
+
+We will build a QDA model to see how accurate it is. Again we will start by fixing the proababilities:
+```{r}
+qda.model = qda(D ~ ., data = dataTrain, prior = c(2/3, 1/3))
+qda.model
+```
+Again a clear distinction between the means of benign and malign. Lets check without fixing probabilities:
+```{r}
+qda.model = qda(D ~ ., data = dataTrain)
+qda.model
+```
+We get almost the same data distribution. We will stick with this. We predict directly:
+
+```{r}
+prediction = predict(qda.model, newdata = dataTest)$class
+confusionMatrix(prediction, dataTest$D)$table
+confusionMatrix(prediction, dataTest$D)$overall[1]
+```
+As we can see we get exactly the same accuracy. However, this model is more interesting as the rate of true positives classifed as negatives is lower. We will stick with this model as the best classifier for the moment. 
+
+
+## **3.3 Decision tree**
+
+Lets continue by exploring decision trees. First of all we need to understand the parameters that modify them:
+
+- Minsplit: Minimum number of observations needed for an split to be created.
+
+- Maxdepth: Maximum depth of the nodes of the tree.
+
+- Cp: Degree of complexity of the tree. The smaller the cp, more branches.
+
+Lets create a first tree by using the following hyper-parameters:
+
+```{r}
+control_hyper = rpart.control(minsplit = 30, maxdepth = 10, cp=0.01)
+model = D ~.
+dtFit <- rpart(model, data=dataTrain, method = "class", control = control_hyper)
+summary(dtFit)
+```
+
+This tree gives importance to the variables Mean Fractal Dimension, Symmetry Largest and Concave Points Largest. Lets plot it to see it better:
+
+
+```{r}
+rpart.plot(dtFit, digits=3)
+```
+The tree starts by classifying all the data as benign. Then with a conditional with Mean Fractal dimension it splits again into benign and malign. With the other two variables mentioned earlier it finishes the classification. 
+
+Just for a better understanding, from the beginning the data are classified as Benign. The number in the middle indicates in every node the proportion of the data which are correctly classified. And the percentage on the bottom, indicate the percentage of data in each nodes towards de whole training set. 
+
+We should also highlight that in every node, when the condition is checked, the side with the lower part of the condition corresponds to to the benign tumors. This agrees with the graphs we saw where always malign tumors had bigger values. It also agrees with the idea exposed in the introduction that largest values correspond to "worst case" values.
+
+Lets modify decrease the cp (aument the complexity) and see what happens:
+
+```{r}
+control_hyper = rpart.control(minsplit = 40, maxdepth = 12, cp=0.001)
+dtFit = rpart(model, data=dataTrain, method = "class", control = control_hyper)
+summary(dtFit)
+rpart.plot(dtFit, digits = 3)
+```
+The tree now only uses 2 variables to classify. Lets see its accuracy:
+```{r}
+dtPred = predict(dtFit, dataTest, type = "class")
+dtProb = predict(dtFit, dataTest, type = "prob")
+threshold = 0.2
+dtPred = rep("Benign", nrow(dataTest))
+dtPred[which(dtProb[,2] > threshold)] = "Malign"
+CM = confusionMatrix(factor(dtPred), dataTest$D)$table
+CM
+confusionMatrix(factor(dtPred), dataTest$D)$overall[1]
+```
+We get the same Accuracy as with the QDA and LDA. However, the classification is more similar to the QDA. We have less malign tumors ranked as positive which is better. 
+
+We will now create a grid with different combination of hyper-parameters:
+```{r}
+cp = seq(from = 0.001, to = 0.015, by = 0.005)
+maxdepth = seq(from = 2, to =10, by = 2)
+minsplit = seq(from = 10, to = 100, by = 5)
+control_hyperparams = expand.grid(cp, maxdepth,minsplit)
+control_hyperparams$acc = 0
+
+```
+
+We will create all the trees and store the accuracies: 
+```{r}
+for(i in 1:length(control_hyperparams$Var1)){
+  control_hyper = rpart.control(minsplit = control_hyperparams[i,3], maxdepth = control_hyperparams[i,2], cp = control_hyperparams[i,1])
+  dtFit <- rpart(model, data=dataTrain, method = "class", control = control_hyper)
+  dtPred <- predict(dtFit, dataTest, type = "class")
+  dtProb <- predict(dtFit, dataTest, type = "prob")
+  threshold = 0.2
+  dtPred = rep("Benign", nrow(dataTest))
+  dtPred[which(dtProb[,2] > threshold)] = "Malign"
+  CM = confusionMatrix(factor(dtPred), dataTest$D)$table
+  control_hyperparams$acc[i] = confusionMatrix(factor(dtPred), dataTest$D)$overall[1]
+}
+```
+
+Now, we check the range of the accuracies:
+
+```{r}
+range(control_hyperparams$acc)
+```
+With all the combination of hyper-parameters the range of accuracies is very high. This makes sense with the visualization done as we could see clear distinctions between malign and benign data. However, this does not suggest an specific tree to use. Lets see wht random forest says:
+
+## **3.4 Random Forest**
+
+We will start by creating a forest with 200 trees to classify the variable Diagnostic:
+
+```{r, message = FALSE}
+rf.train = randomForest(D ~., data=dataTrain, ntree=200,mtry=10,cutoff=c(0.75,0.25),importance=TRUE, do.trace=T)
+```
+We will now use this to predict the data and create the confusion matrix:
+
+
+```{r}
+rf.pred = predict(rf.train, newdata = dataTest)
+confusionMatrix(rf.pred, dataTest$D)
+```
+We can observe a good accuracy (90.91%) but not the best until the moment. It is also good because out of the 9 errors only 1 correspond to a malign tumor ranked as benign. 
+
+Lets try with different combinations oh hyper-parameters. For Random Forests, the hyper-parameters are:
+
+- n-tree: The number of trees.
+
+- m-try: Number of variables to randomly sample at each split.
+
+```{r}
+ctrl = trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+rf.train = train(D ~., 
+                  method = "rf", 
+                  data = dataTrain,
+                  preProcess = c("center", "scale"),
+                  ntree = c(200),
+                  cutoff=c(0.7,0.3),
+                  tuneGrid = expand.grid(mtry=seq(from=2, to=26, by =1)),
+                  
+              
+                  trControl = ctrl)
+rf.train
+```
+As we can observe varying the number of m-try does not reach any very big differences. The accuracy is always around 94-95%. lEts check for the variable importance:
+
+```{r}
+rf_imp = varImp(rf.train, scale = F)
+plot(rf_imp, scales = list(y = list(cex = .95)))
+```
+The most importance variable is Concave Points largest value followed by its standard variation and the Mean Fractal Dimension. Lets check the prediction: 
+
+```{r}
+rfPred = predict(rf.train, newdata = dataTest)
+CM = confusionMatrix(factor(rfPred), dataTest$D)$table
+confusionMatrix(factor(rfPred), dataTest$D)$overall[1]
+CM
+```
+We obtain a 94% accuracy but we do not have any mistakes of malign tumors being ranked as benign. This is the best model for the moment.
+As we consider this as our best model lets plot the ROC curve:
+
+```{r, warning=FALSE}
+probability = predict(rf.train, dataTest, type = "prob")
+roc.lda = roc(dataTest$D,probability[,2])
+auc(roc.lda) 
+plot.roc(dataTest$D, probability[,2],col="darkblue", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", print.thres=TRUE)
+```
+As we can see we have been trying to get a sensitivity of 100% because we believe its more important for what we are studying. 
+
+## **3.5 Gradient Boosting**
+
+We will now use the gradient boosting package. We will define a grid and a ctrl:
+
+```{r}
+xgb_grid = expand.grid(
+  nrounds = c(500,1000),
+  eta = c(0.01, 0.001), 
+  max_depth = c(2, 4, 6),
+  gamma = 1,
+  colsample_bytree = c(0.2, 0.4),
+  min_child_weight = c(1,5),
+  subsample = 1
+)
+ctrl = trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+```
+We will create the training function:
+```{r, message=FALSE, warning=FALSE, results = FALSE}
+xgb.train = train(D ~ .,  data = dataTrain,
+                  trControl = ctrl,
+                  metric="EconomicCost",
+                  maximize = F,
+                  tuneGrid = xgb_grid,
+                  preProcess = c("center", "scale"),
+                  method = "xgbTree"
+)
+```
+Lets check the varaible importance:
+```{r}
+xgb_imp = varImp(xgb.train, scale = F)
+plot(xgb_imp, scales = list(y = list(cex = .95)))
+```
+We get a similar variable importance than before. Again the Mean Fractal Dimension, Concave Points Largest and Perimeter Standard deviation are the most relevant variables. Lets predict and check for the accuracy:
+
+```{r}
+xgbPred = predict(xgb.train, newdata = dataTest)
+CM = confusionMatrix(factor(xgbPred), dataTest$D)$table
+confusionMatrix(factor(xgbPred), dataTest$D)$overall[1]
+CM
+```
+With xgboost we are obtaining the best accuracy. However, we are still having one malign tumor ranked as positive. Because of this, we will still consider the previous model as the best and definite one.
+
+## **3.7 Conclusions**
+
+The best model obtained has been reached using random forests with different folds and values for m-try. However, every model has had a very good accuracy and that is why we have been focusing on sensitivity. All the models have agreed in the following conclusions:
+
+- The most important variables have been Mean Fractal Dimension, Concave Points Standard Deviation, Concave Points Largest and Symmetry standard deviation. As we can see all of the variables are geometry related.
+
+- We have seen how in every variable malign tumors have higher values than benigns. This agrees with what has been seen in the graphs. 
+
+- Every model has a very high accuracy which means that if we know this data it is very easy to predict with high accuracy wether the tumor is benign or malign.
+
+# **4.Advanced Regression**
+
+As we are going to use lots of different prediction so we will be storing them in this data frame:
+
+ 
+```{r}
+meanFractalresults = data.frame(seq(1,99))
+```
+
+## **4.1 Linear Regression**
+
+With the data classification we have seen what variables are more important for predicting if a tumor is either benign or malign. The most significant variable is the Mean Fractal Dimension of the cells of the tumor. This is why in this section we are going to try to predict it. First, we will see which variables have a greater correlation with the Mean Fractal Dimension: 
+
+```{r}
+corr_MF = sort(cor(dataTrain[,-c(1)])["MF",], decreasing = T)
+corr = data.frame(corr_MF)
+ggplot(corr,aes(x = row.names(corr), y = corr_MF)) + 
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  scale_x_discrete(limits= row.names(corr)) +
+  labs(x = "Predictors", y = "MF", title = "Correlations") + 
+  theme(plot.title = element_text(hjust = 0, size = rel(1.5)),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+We can observe how there are 9 variables with a significantly high positive correlation. We will first try a simple linear regression with the variable with the most correlation, which is the Perimeters Standard Deviation: 
+
+```{r}
+linFit = lm(MF ~ Psd, data=dataTrain)
+summary(linFit)
+```
+
+We can see how we get a high value for the coefficent of correlation (0.8263). We can get some plots: 
+
+```{r}
+par(mfrow = c(2, 2))
+plot(linFit, pch = 23 ,bg ='orange',cex = 2)
+```
+
+```{r}
+pr.simple = (predict(linFit, newdata=dataTest))
+meanFractalresults = cbind(meanFractalresults, pr.simple)
+cor(dataTest$MF, pr.simple)^2
+```
+
+We can observe how it is already a great model. We obtain a correlation of 87% between the real and the predicted data. However, lets try to make it better. We can visualize this:
+
+```{r}
+qplot(meanFractalresults$pr.simple, dataTest$MF) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0, 0.5), y = c(0, 0.5)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+
+
+
+## **4.2 Multiple Regression**
+
+For a first approach, we will develop a model using the variables we saw that ahd a greater correlation:
+
+```{r}
+linFitMultipleFirst = lm(MF ~ Psd + MP + SyL + Sysd + CPsd + CL + RL + CPL + MR , data = dataTrain)
+summary(linFitMultipleFirst)
+```
+
+We can see how introducing all this variables has risen a lot the R^2 value. Lets see the correlation of the the predicted data:
+
+```{r}
+pr.multipleFirst = (predict(linFitMultipleFirst, newdata=dataTest))
+meanFractalresults = cbind(meanFractalresults, pr.multipleFirst)
+cor(dataTest$MF, pr.multipleFirst)^2
+```
+The correlation now its very high, 95%. This actually makes sense. Fractal Dimension is a variale related with a geometric property. As we can observe, all the variables used for the model are related with geometry. They seem to be very good indicator of what the Mean Fractal Dimension should be. We can visualize this again: 
+
+```{r}
+qplot(meanFractalresults$pr.multipleFirst, dataTest$MF) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0,0.5), y = c(0,0.5)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+Comparing it with the previous graph we can see how point seem to adjust a bit better to the center. That is beacuse we have a better correlation. 
+
+## **4.3 Model Selection**
+
+With this variables that have given a good model we will proceed to fin the best. Maybe our last model was over-trained and we could achieve the same correlation by including less variables.
+
+** Disclaimer: the output of this cell has been hidden because it was too long and no relevant. It was just all the possible model combinations. 
+
+```{r, warning = FALSE, message=FALSE, results = FALSE}
+model = MF ~ Psd + MP + SyL + Sysd + CPsd + CL + RL + CPL + MR
+
+linFit = lm(model, data = dataTrain)
+
+ols_step_all_possible(linFit) 
+```
+
+```{r}
+ols_step_best_subset(linFit)
+```
+As we can observe from the model 3 we get pretty much the same value of R^2. While it is true that the best model would still be the last one (the one used in the previous section) the difference is bearly noticeable and we would be overtraining the model. Therefore we will stick with model 3 for the moment, which takes as variables:
+
+- The Perimeter Standard Deviation
+
+- Symmetry Largest Value
+
+- Mean Perimeter.
+
+As we can observe again, this three variables are goemtric related. 
+
+```{r}
+ols_step_forward_p(linFit)
+plot(ols_step_forward_p(linFit))
+```
+
+With this graphs it is easier to see how the R Square value becomes stable so we do not need to include more variables. We would be over-training the model. For one last comparison we can check this table were this is even more clear: 
+
+```{r}
+ols_step_backward_aic(linFit) 
+```
+
+Lets take an insight on our chosen model: 
+
+```{r}
+linFitMultModel = lm(MF ~ Psd + MP + SyL, data = dataTrain)
+summary(linFitMultModel)
+```
+
+We can still see how the highest coefficient is for the Perimeter Standard Deviation. This means that it is still the most relevant 
+as it will have the most importance as it will contribute the most to the Mean Fractal Dimension. It is also interesting to notice how the coefficient for the Mean Perimeter is negative. This means that the bigger the perimeter, the smallest the fractal dimension. Lets quickly recall one of the graphs we saw in the Data Visualization section: 
+
+```{r}
+ggplot(dataClean, aes(x=MP, y=MF, size = SyL, color = D)) +
+  geom_point(alpha=0.7) + geom_smooth(method=lm, se=FALSE, formula = y~x) +
+  xlab("Mean Perimeter") + ylab("Mean Fractal Dimension") + labs(color = "Diagnostic", size = "Symmetry Largest") + 
+  ggtitle("Mean Fractal Dimension as a function of the Mean Perimeter") + scale_color_manual(values=c('#0000FF','#FF0000'))
+```
+
+ As we can see malign tumors have a bigger Perimeter and Fractal Dimension. This contradicts what we are seeing. This is because the model is using it as a corrector as both of the two other coefficients are positive. 
+ 
+ Lets use our model to predict the data: 
+ 
+```{r}
+pr.multipleModel = predict(linFitMultModel, newdata = dataTest)
+meanFractalresults = cbind(meanFractalresults, pr.multipleModel)
+cor(dataTest$MF, pr.multipleModel)^2
+```
+ We can observe a great correlation. It is true that it is 0.01 lower than the one obtained using all the variables but is not a big difference in correlation but it is in computation terms as it means including 5 more variables. We will stick for now to our model. Lets visualize this: 
+ 
+```{r}
+qplot(meanFractalresults$pr.multipleModel, dataTest$MF) + 
+  labs(title="Linear Regression Observed VS Predicted", x="Predicted", y="Observed") +
+  lims(x = c(0,0.5), y = c(0,0.5)) +
+  geom_abline(intercept = 0, slope = 1, colour = "blue") +
+  theme_bw()
+```
+ We can not see much difference with the previous graph because, as we commented, the models have pretty much the same results.
+ 
+## **4.4 Advanced Regression Models**
+ 
+### **4.4.1 Ridge Regression**
+ 
+ We will first define the matrix for the model:
+ 
+```{r}
+X = model.matrix(MF ~ Psd + MP + SyL, data = dataTrain)
+
+Y = dataTrain$MF
+```
+ 
+ Secondly, we create a grid with the possible values for lambda:
+
+```{r}
+grid = seq(0, .1, length = 100)
+```
+
+Now, we create and plot the model:
+```{r}
+ridge.mod = glmnet(X, Y, alpha = 0, lambda = grid)
+plot(ridge.mod)
+```
+This graph its difficult to understand. Lets plot another one to see the best value of lambda:
+
+
+```{r}
+ridge.cv = cv.glmnet(X, Y, type.measure="mse", alpha=0)
+plot(ridge.cv)
+```
+As we can see the best value for lambda is the lowest one. Lets obtain the exact value: 
+
+```{r}
+opt.lambda = ridge.cv$lambda.min
+opt.lambda
+```
+With this value of lambda lets check how our model is working: 
+
+```{r}
+lambda.index = which(ridge.cv$lambda == ridge.cv$lambda.1se)
+beta.ridge = ridge.cv$glmnet.fit$beta[, lambda.index]
+beta.ridge
+```
+As we can see now, all the coefficients are positive. This makes more sense with the graphs previously analyzed (as a grater perimeter suggested a greater fractal dimension). Now the modulus of the coefficients is lower which makes sense again as now we do not have any negative one.  
+```{r}
+X.test = model.matrix(MF ~ Psd + MP + SyL, data = dataTest)
+
+ridge.pred = predict(ridge.cv$glmnet.fit, s = opt.lambda, newx = X.test)
+meanFractalresults = cbind(meanFractalresults, ridge.pred)
+```
+Lets check the R-squared value of this model:
+```{r}
+y.test = dataTest$MF
+
+postResample(pred = ridge.pred,  obs = y.test)
+```
+The R-squared value obtained is very good but less that in the previous model (0.91<0.93). Lets retry this using caret:
+
+```{r}
+ridge_grid = expand.grid(lambda = seq(0, 0.1, length = 100))
+ctrl = trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+
+ridge_tune = train(MF ~ Psd + MP + SyL, data = dataTrain,
+                    method = 'ridge',
+                    preProc = c('scale','center'),
+                    tuneGrid = ridge_grid,
+                    trControl = ctrl)
+plot(ridge_tune)
+```
+We can observe how a greater Weight Decay means a greater RMSE. We can find the best tune (lambda):
+
+```{r}
+ridge_tune$bestTune
+```
+This value of lambda is lower than the one before (0.001<0.004). Lets predict:
+```{r}
+meanFractalresults$ridge.caret <- predict(ridge_tune, dataTest)
+
+postResample(pred = meanFractalresults$ridge.caret,  obs = dataTest$MF)
+```
+We now obtain the greatest R-squared value until the moment. This makes sense, the k-cross gets the best value among different divisions and we obtained a much lower value for lambda than we did before. 
+
+### **4.4.2 The Lasso **
+
+Again using caret, we can use the method lasso to predict our new model: 
+
+```{r}
+lasso_grid = expand.grid(fraction = seq(.01, 1, length = 100))
+
+lasso_tune = train(MF ~ Psd + MP + SyL, data = dataTrain,
+                    method = 'lasso',
+                    preProc = c('scale','center'),
+                    tuneGrid = lasso_grid,
+                    trControl = ctrl)
+plot(lasso_tune)
+```
+Again from this graph lets obtain the best value: 
+
+```{r}
+lasso_tune$bestTune
+```
+Applying this tune lets observe our results:
+```{r}
+meanFractalresults$lasso = predict(lasso_tune, dataTest)
+postResample(pred = meanFractalresults$lasso,  obs = dataTest$MF)
+```
+We are obtaining again 0.93. This seems to be the highest R squared value we can obtain.
+
+### **4.4.3 Elastic Net**
+
+As a last approach in Advanced Regression lets check using the method glmnet and an elastic grid: 
+```{r}
+elastic_grid = expand.grid(alpha = seq(0, .2, 0.01), lambda = seq(0, .1, 0.01))
+
+glmnet_tune = train(MF ~ Psd + MP + SyL, data = dataTrain,
+                     method = 'glmnet',
+                     preProc = c('scale','center'),
+                     tuneGrid = elastic_grid,
+                     trControl = ctrl)
+
+plot(glmnet_tune)
+```
+Lets obtain the best tune from the graph:
+
+```{r}
+glmnet_tune$bestTune
+```
+And with this tune, lets predict and store the values:
+
+```{r}
+meanFractalresults$glmnet = predict(glmnet_tune, dataTest)
+postResample(pred = meanFractalresults$glmnet,  obs = dataTest$MF)
+```
+Again, the same R-squared value. We assume this is the maximum we can obtain no matter what method we use. 
+
+## **4.5 Machine Learning Tools**
+
+### **4.5.1 kNN**
+
+We will start by applying the k nearest neighbour method. In this method we have three parameters that we must select:
+
+- kernel: how do we want the method to be executed.
+
+- distance: the chosen parameters for the Minkowski distance.
+
+- kmax: how many neighbours do we want to consider. 
+
+
+```{r}
+knn_tune = train(MF ~ Psd + MP + SyL, 
+                  data = dataTrain,
+                  method = "kknn",   
+                  preProc = c('scale','center'),
+                  tuneGrid = data.frame(kmax = c(4, 6, 8, 10 ,12),distance = 2,kernel = 'optimal'),
+                  trControl = ctrl)
+plot(knn_tune)
+```
+After trying with different values for kmax, we have come to eh conclusion that 6 gives the lowest RMSE. Lets predict:
+
+```{r}
+meanFractalresults$knn = predict(knn_tune, dataTest)
+
+postResample(pred = meanFractalresults$knn,  obs = dataTest$MF)
+```
+We obtain a 0.91 R-squared value. It is a great value but not the highest until now.
+
+### **4.5.2 Random Forests**
+We apply a new classification method using Random Forest. We will use a 100 trees:
+```{r}
+rf_tune <- train(MF ~ Psd + MP + SyL, 
+                 data = dataTrain,
+                 method = "rf",
+                 preProc = c('scale','center'),
+                 trControl = ctrl,
+                 ntree = 100,
+                 tuneGrid = data.frame(mtry=c(1,3,5,7)),
+                 importance = TRUE)
+
+plot(rf_tune)
+```
+
+With 5 predictors we get the less RSME. Lets predict and check the R-squared value: 
+
+```{r}
+meanFractalresults$rf = predict(rf_tune, dataTest)
+
+postResample(pred = meanFractalresults$rf,  obs = dataTest$MF)
+```
+Again we get a very similar R-squared (a bit under). The model is also very good. We can see if the Random Forest agrees with the variable importance we have seen in previous sections:
+
+
+```{r}
+plot(varImp(rf_tune, scale = F), scales = list(y = list(cex = .95)))
+```
+This agrees with what we have seen:
+
+- The most important variable is the Perimeter Standard Deviation
+
+- Second, the largest Symmetry value
+
+- On third place, the mean perimeter
+
+## **4.6 Conclusions**
+
+### **4.6.1 Final Predictions**
+
+As we have stored all our predictions in a data frame we are going to take as our final prediction the average of the three predictions with the less RMSE. Lets first calculate it:
+
+```{r}
+apply(meanFractalresults[-1], 2, function(x) mean(abs(x - dataTest$MF)))
+```
+
+Our final prediction will be the mean between the the Elastic Net model, the kNN and the random Forest models. However, we can see that with the exception of the simple linear regression the rest are very similar. Lets combine them:
+
+```{r}
+meanFractalresults$comb = (meanFractalresults$knn + meanFractalresults$rf + meanFractalresults$glmnet)/3
+
+postResample(pred = meanFractalresults$comb,  obs = dataTest$MF)
+```
+With this combination we get a 0.935 value for the R-squared value and 0.0157 for the Residual Mean Squared Error. This values are a bit worse than the ones obtained for some models on their own (by a very small difference). However, it is better to work with a mean as maybe it was a coincidence such good values. This way we can ensure that our multiple linear regression models can predict with a very high accuracy the Mean Fractal dimension of the cells in a tumor, which is very important because we saw that it is the more relevant variable when deciding if a tumor is malign or benign. 
+
+As a limitation, it is true that all the variables we are using to predict the Mean Fractal Dimension are geometry related. This means that they are maybe directly related to it and that might be why the predictions are so good. Notwithstanding the foregoing, we have seen in the classification section that Fractal Dimension has a higher importance than the other geometry related variables. Also, the other geometric related variables are easier to calculate. 
+
+This means that with such a great accuracy when predicting if we did not have the means to calculate the Fractal Dimension we could obtain from the other variables and then use it to predict wether a tumor is benign or malign. 
+
+### **4.6.2 Prediction Intervals**
+
+```{r}
+yhat = meanFractalresults$comb
+y = dataTest$MF
+error = dataTest$MF - yhat
+hist(error, col = "lightblue")
+```
+We can observe how the errors kind of follow a normal shaped distribution. We will create some prediction intervals with a 95% confidence:
+
+```{r}
+noise = error[1:20]
+lwr = yhat[21:length(yhat)] + quantile(noise,0.05, na.rm=T)
+upr = yhat[21:length(yhat)] + quantile(noise,0.95, na.rm=T)
+```
+
+We now create the predictions and count how many are out of the interval:
+```{r}
+predictions = data.frame(real=y[21:length(y)], fit=yhat[21:length(yhat)], lwr=lwr, upr=upr)
+
+predictions = predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+
+
+mean(predictions$out==1)
+```
+13% of the observations are outside. We can visualize it here: 
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  xlim(0, 0.3) + ylim(0, 0.3)+
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Prediction intervals", x = "prediction",y="real price")
+```
+
+### **4.6.3 Conclusions about the models**
+
+After using many models we can draw some conclusions about them:
+
+- In this assignment we have obtained better R-squared values for the more complex models. 2 of the best 3 models were obtained using Machine Learning. 
+
+- The difference of accuracy when predicting between complex and not so complex models is not big. This means that in computation terms it may be not efficient to develop this models when predicting the Fractal Dimension.
+
+- Including more variables is sometimes not useful. As we have observed the accuracy does not increase proportionally to the number of variables used (even though if the correlation with the predicted variable is high). This means that a previous study on how many variables to use with a proportion of the data set might be useful before creating a complex model with many observations. 
+
+# **5. Insight on Fractal Dimension**
+
+As a conclusion to the assignment it would be good to understand what is the Fractal Dimension as it has come out to be the most important variable to predict if a tumor is benign or malign. 
+
+The Fractal dimension is a ratio which provides a statistical index which allows to compare how complex the pattern (border) of something is. Applied to our case, the Fractal Dimension represents how complex is the border of the cells analyzed. It has been seen how the more complex this border is the more probable for the tumor to be malign. 
+
+"Fractal analysis of images of breast tissue specimens provides a numeric description of tumor growth patterns as a continuous number between 1 and 2. This number, the fractal dimension, is an objective and reproducible measure of the complexity of the tissue architecture of the biopsy specimen." (University of Calgary, 2011)
+
+It is actually a very important and used variable when determining if a cancer is malign or benign, and this assignment has proven so. 
+
